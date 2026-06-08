@@ -33,6 +33,27 @@ python -m src.pipeline
 streamlit run app.py
 ```
 
+## Evaluation
+
+The classifier is measured against a **human golden set** — `eval/golden.jsonl`
+— not against itself. The ground-truth labels are filled in **by hand** after
+reading each cluster's issues; they are **never LLM-generated and never copied
+from `data/triage.json`**. If the golden labels came from the model, the
+evaluation would be circular and meaningless — the golden set exists precisely
+to be an independent human judgment to measure the model against.
+
+```
+# 1. Fill eval/golden.jsonl to ~30 rows by hand (the committed file is a template).
+# 2. Score the model's predictions against your labels:
+python -m eval.run_eval
+```
+
+`run_eval.py` joins golden labels to predictions on `cluster_id` and prints
+per-type and per-difficulty precision / recall / F1 and confusion matrices
+(via `sklearn.metrics`). Rows still marked `TODO` are treated as unfilled and
+skipped, so you can label incrementally; with zero filled rows it just reports
+that the golden set is still a template.
+
 ## Roadmap (Phase 2)
 
 - Learner skill profiles + matching score

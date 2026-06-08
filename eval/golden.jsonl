@@ -1,0 +1,21 @@
+# eval/golden.jsonl — HUMAN-LABELED ground truth for the triage classifier.
+#
+# THIS IS A TEMPLATE. Fill it to ~30 rows BY HAND, using YOUR OWN judgment after
+# reading each cluster's issues. Do NOT generate these labels with an LLM, and do
+# NOT copy them from data/triage.json — the whole point is an independent human
+# ground truth to measure the model against. If golden == model output, the eval
+# is meaningless.
+#
+# One JSON object per line:
+#   {"cluster_id": <int>, "human_type": "<bug|feature|docs|question|other>",
+#    "human_difficulty": "<beginner|intermediate|advanced>", "note": "<why>"}
+#
+# Rows whose labels are still "TODO" (or empty/invalid) are treated as UNFILLED
+# and skipped by run_eval.py, so you can fill them incrementally.
+#
+# --- example rows (replace the TODO labels with your judgment) ---
+{"cluster_id": 0, "human_type": "TODO", "human_difficulty": "TODO", "note": "example — read cluster 0's issues, then set type+difficulty"}
+{"cluster_id": 1, "human_type": "TODO", "human_difficulty": "TODO", "note": "example — replace TODO with your own call"}
+{"cluster_id": 2, "human_type": "TODO", "human_difficulty": "TODO", "note": "example"}
+{"cluster_id": 3, "human_type": "TODO", "human_difficulty": "TODO", "note": "example"}
+{"cluster_id": 4, "human_type": "TODO", "human_difficulty": "TODO", "note": "example"}
