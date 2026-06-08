@@ -1,6 +1,7 @@
 requests>=2.31
 langchain>=0.2
 langchain-google-genai>=1.0
+langchain-ollama>=1.0          # optional local backend (LLM_BACKEND=ollama)
 faiss-cpu>=1.8
 streamlit>=1.35
 pandas>=2.0
