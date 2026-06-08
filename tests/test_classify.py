@@ -47,5 +47,71 @@ class TestCoerce(unittest.TestCase):
         self.assertFalse(c.coerce({"type": "bug", "confidence": 0.8})["needs_review"])
 
 
+class _Resp:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeChat:
+    """Returns a fixed reply for any prompt — lets us test roles offline."""
+    def __init__(self, content):
+        self._content = content
+
+    def invoke(self, prompt):
+        return _Resp(self._content)
+
+
+class TestVerifier(unittest.TestCase):
+    rec = {"number": 1, "title": "t", "clean_text": "body"}
+    label = {"type": "bug", "difficulty": "beginner", "confidence": 0.6,
+             "rationale": "x", "needs_review": False}
+
+    def test_verifier_agrees(self):
+        chat = _FakeChat('{"agree": true, "type": "bug", "difficulty": "beginner", "reason": "ok"}')
+        out = c._verify_one(chat, self.rec, self.label)
+        self.assertTrue(out["agree"])
+
+    def test_verifier_disagrees_on_changed_label(self):
+        # says agree:true but changes the type -> treated as a disagreement
+        chat = _FakeChat('{"agree": true, "type": "feature", "difficulty": "beginner", "reason": "req"}')
+        out = c._verify_one(chat, self.rec, self.label)
+        self.assertFalse(out["agree"])
+        self.assertEqual(out["type"], "feature")
+
+    def test_verifier_fails_open_when_unavailable(self):
+        class Dead:
+            def invoke(self, p): raise RuntimeError("boom")
+        out = c._verify_one(Dead(), self.rec, self.label)
+        self.assertTrue(out["agree"])  # never invents a disagreement
+
+
+class TestRouter(unittest.TestCase):
+    def _fixture(self):
+        records = [{"number": i, "title": f"issue {i}"} for i in range(4)]
+        clusters = [[0], [1, 2], [3]]                      # sizes 1, 2, 1
+        labels = [
+            {"type": "bug", "difficulty": "beginner", "needs_review": False},
+            {"type": "docs", "difficulty": "beginner", "needs_review": False},
+            {"type": "bug", "difficulty": "advanced", "needs_review": False},
+        ]
+        return records, clusters, labels
+
+    def test_route_deterministic_picks_largest_matching(self):
+        records, clusters, labels = self._fixture()
+        out = c.route({"difficulty": "beginner"}, records, clusters, labels)  # no chat
+        self.assertEqual(out["cluster_id"], 1)             # the size-2 beginner cluster
+
+    def test_route_no_match(self):
+        records, clusters, labels = self._fixture()
+        out = c.route({"difficulty": "intermediate"}, records, clusters, labels)
+        self.assertIsNone(out["cluster_id"])
+
+    def test_route_llm_pick_clamped_to_candidate(self):
+        records, clusters, labels = self._fixture()
+        chat = _FakeChat('{"cluster_id": 999, "reason": "hallucinated"}')  # invalid id
+        out = c.route({"skill": "css", "difficulty": "beginner"}, records, clusters, labels, chat=chat)
+        self.assertIn(out["cluster_id"], {0, 1})           # clamped to a real candidate
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,24 +3,34 @@ classify.py — LLM consumer: label each issue cluster.
 
 Architectural parallel (production crash triage): label the crash *signature*
 once, then apply to every instance. Here we classify the cluster
-representative and fan the label out to all members — 115 clusters
-means 115 Gemini calls, not 275. The clustering step pays for itself
+representative and fan the label out to all members — 120 clusters
+means ~120 LLM calls, not 295. The clustering step pays for itself
 by cutting LLM calls by more than half.
 
 Design stance — treat the LLM as an unreliable network dependency:
   * a strict "return ONLY JSON" prompt,
   * a parser that survives code fences and chatty wrappers,
   * coercion that clamps any hallucinated label to the allowed vocab,
-  * exponential backoff on rate limits,
+  * exponential backoff on rate limits + fail-fast on per-day quota,
   * a graceful low-confidence fallback so one flaky call never crashes
-    the run — and low-confidence results are flagged for human review
-    rather than trusted blindly.
+    the run — and low-confidence results are flagged for human review.
+
+Two modes (CLASSIFY_MODE):
+  * "single" (default): one Triage call per cluster — original behavior.
+  * "multi": three composable roles behind the SAME model-agnostic backend —
+      Triage   — assigns type/difficulty (the per-cluster call),
+      Verifier — re-checks a label against the issue's evidence and, on
+                 disagreement, flags needs_review. Runs ONLY on lower-confidence
+                 labels, so the call budget stays sane (not a blind 3x).
+      Router   — given a learner target (skill/difficulty), picks the
+                 best-matching cluster. On-demand, not per cluster.
 
 `staleness` is intentionally NOT asked of the model — it's a date
 computation handled in normalize.py.
 
 Usage:
-    python -m src.classify        # classifies clusters built by cluster.py
+    python -m src.classify                 # CLASSIFY_MODE=single (default)
+    CLASSIFY_MODE=multi python -m src.classify
 """
 
 import json
@@ -47,7 +57,10 @@ MODEL_NAME = OLLAMA_MODEL if LLM_BACKEND == "ollama" else GEMINI_MODEL
 # Cloud needs pacing for tokens/min; local has no TPM ceiling — rip through it.
 SLEEP = 0.0 if LLM_BACKEND == "ollama" else 5.0
 BODY_CHARS = 1500      # truncate body sent to the model
-CACHE_FILE = ingest.CACHE_DIR / f"classify_{MODEL_NAME.replace(':', '_').replace('/', '_')}.json"
+
+# Multi-agent mode + the band in which the Verifier runs.
+CLASSIFY_MODE = os.environ.get("CLASSIFY_MODE", "single").lower()   # "single" | "multi"
+VERIFY_CONF_THRESHOLD = 0.8   # multi mode: verify only labels below this confidence
 
 TYPES = ["bug", "feature", "docs", "question", "other"]
 DIFFICULTIES = ["beginner", "intermediate", "advanced"]
@@ -72,31 +85,56 @@ Issue body (may be truncated):
 {body}
 """
 
+VERIFY_PROMPT = """You are double-checking a triage label on a GitHub issue.
+A first pass proposed — type: {ptype}, difficulty: {pdifficulty}.
+Re-read the issue and judge whether that label is correct.
+Return ONLY a JSON object — no prose, no code fences — with exactly these keys:
+  "agree": true or false
+  "type": the correct one of {types}
+  "difficulty": the correct one of {difficulties}
+  "reason": one short sentence (max 20 words)
+
+Issue title: {title}
+Issue body (may be truncated):
+{body}
+"""
+
+ROUTE_PROMPT = """A learner wants their first open-source issue to work on.
+Target — skill/topic: {skill}; difficulty: {difficulty}.
+From the candidate clusters below, pick the single BEST match.
+Return ONLY a JSON object: {{"cluster_id": <int from the list>, "reason": "<one short sentence>"}}
+
+Candidates:
+{candidates}
+"""
+
 
 # --- defensive parsing ------------------------------------------------------
 
 _JSON_OBJ = re.compile(r"\{.*\}", re.DOTALL)
 
 
-def parse_response(text: str) -> dict:
-    """Extract a JSON object from a possibly-chatty / fenced LLM reply.
-
-    Survives ```json fences and leading/trailing prose. Returns the
-    FALLBACK label if nothing parseable is found.
-    """
+def _json_from(text: str) -> dict | None:
+    """Extract the first JSON object from a possibly-fenced/chatty reply."""
     if not text:
-        return dict(FALLBACK)
-    cleaned = text.strip()
-    # Drop code fences if present.
-    cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
-    cleaned = re.sub(r"```$", "", cleaned).strip()
-    m = _JSON_OBJ.search(cleaned)
+        return None
+    s = re.sub(r"^```(?:json)?", "", text.strip()).strip()
+    s = re.sub(r"```$", "", s).strip()
+    m = _JSON_OBJ.search(s)
     if not m:
-        return dict(FALLBACK)
+        return None
     try:
-        return coerce(json.loads(m.group(0)))
+        return json.loads(m.group(0))
     except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def parse_response(text: str) -> dict:
+    """Parse a Triage reply into a clamped label, or FALLBACK if unparseable."""
+    obj = _json_from(text)
+    if obj is None:
         return dict(FALLBACK)
+    return coerce(obj)
 
 
 def coerce(obj: dict) -> dict:
@@ -124,7 +162,7 @@ def coerce(obj: dict) -> dict:
     }
 
 
-# --- model call -------------------------------------------------------------
+# --- model call (shared, with backoff + daily-quota fail-fast) --------------
 
 def _chat():
     """Return a LangChain chat client. Both backends expose the same
@@ -140,78 +178,202 @@ def _chat():
     return ChatGoogleGenerativeAI(model=GEMINI_MODEL, google_api_key=key, temperature=0)
 
 
-def _classify_one(chat, rec: dict, max_tries: int = 6) -> dict:
-    prompt = PROMPT.format(
-        types=TYPES, difficulties=DIFFICULTIES,
-        title=rec["title"][:200],
-        body=rec["clean_text"][:BODY_CHARS],
-    )
+def _invoke(chat, prompt: str, log: str, max_tries: int = 6) -> str | None:
+    """Call the model, returning text or None. Fail-fast on per-day quota,
+    exponential backoff on per-minute limits, swallow other errors."""
     delay = 15.0
     for attempt in range(max_tries):
         try:
             resp = chat.invoke(prompt)
-            return parse_response(getattr(resp, "content", "") or "")
+            return getattr(resp, "content", "") or ""
         except Exception as e:  # noqa: BLE001
             msg = str(e)
-            # Per-DAY quota won't recover by waiting minutes — fail fast so the
-            # run finishes in seconds with fallbacks instead of grinding hours.
             if "PerDay" in msg or "RequestsPerDay" in msg:
-                print(f"  [daily-quota] exhausted — fallback for #{rec['number']}")
-                return dict(FALLBACK)
-            # Per-MINUTE rate limit: back off and retry.
+                print(f"  [daily-quota] exhausted — {log}")
+                return None
             if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
                 print(f"  [rate-limit] backing off {delay:.0f}s "
-                      f"(attempt {attempt + 1}/{max_tries})")
+                      f"(attempt {attempt + 1}/{max_tries}) — {log}")
                 time.sleep(delay)
                 delay *= 2
                 continue
-            # Any other error: don't crash the whole run on one bad issue.
-            print(f"  [warn] classify error on #{rec['number']}: {e}")
-            return dict(FALLBACK)
-    return dict(FALLBACK)
+            print(f"  [warn] LLM error ({log}): {e}")
+            return None
+    return None
+
+
+# --- the three roles --------------------------------------------------------
+
+def _triage_one(chat, rec: dict, max_tries: int = 6) -> dict:
+    """Triage agent: assign type/difficulty for one cluster representative."""
+    prompt = PROMPT.format(
+        types=TYPES, difficulties=DIFFICULTIES,
+        title=rec["title"][:200], body=rec["clean_text"][:BODY_CHARS],
+    )
+    text = _invoke(chat, prompt, f"#{rec.get('number')}", max_tries)
+    return dict(FALLBACK) if text is None else parse_response(text)
+
+
+# Back-compat alias: callers (and tests) may still use _classify_one.
+_classify_one = _triage_one
+
+
+def _verify_one(chat, rec: dict, label: dict, max_tries: int = 4) -> dict:
+    """Verifier agent: re-check a proposed label against the issue evidence.
+    Returns {agree, type, difficulty, reason}. Fails open (agree) if the model
+    is unavailable, so verification never *invents* a disagreement."""
+    prompt = VERIFY_PROMPT.format(
+        types=TYPES, difficulties=DIFFICULTIES,
+        ptype=label["type"], pdifficulty=label["difficulty"],
+        title=rec["title"][:200], body=rec["clean_text"][:BODY_CHARS],
+    )
+    text = _invoke(chat, prompt, f"verify #{rec.get('number')}", max_tries)
+    if text is None:
+        return {"agree": True, "type": label["type"],
+                "difficulty": label["difficulty"], "reason": "verifier unavailable"}
+    obj = _json_from(text) or {}
+    vt = str(obj.get("type", "")).lower().strip()
+    vd = str(obj.get("difficulty", "")).lower().strip()
+    vt = vt if vt in TYPES else label["type"]
+    vd = vd if vd in DIFFICULTIES else label["difficulty"]
+    # Treat a stated "agree" that nonetheless changes a label as a disagreement.
+    agree = bool(obj.get("agree", True)) and vt == label["type"] and vd == label["difficulty"]
+    reason = str(obj.get("reason", "")).strip()[:160] or "(none)"
+    return {"agree": agree, "type": vt, "difficulty": vd, "reason": reason}
+
+
+def route(target: dict, records: list[dict], clusters: list[list[int]],
+          labels: list[dict], chat=None, shortlist: int = 12) -> dict:
+    """Router agent: pick the best cluster for a learner target.
+
+    target = {"skill": <str|None>, "difficulty": <beginner|intermediate|advanced|None>}.
+    Deterministically prefilters by difficulty and ranks by size, then (if a chat
+    client and a skill are given) asks the model to pick from the shortlist — and
+    clamps the answer to a real candidate. With no chat, returns the top
+    deterministic match. Never multiplies the per-cluster budget.
+    """
+    tdiff = str(target.get("difficulty") or "").strip().lower()
+    skill = str(target.get("skill") or "").strip()
+
+    cands = []
+    for cid, (members, label) in enumerate(zip(clusters, labels)):
+        if label.get("needs_review"):
+            continue
+        if tdiff and label["difficulty"] != tdiff:
+            continue
+        cands.append({
+            "cluster_id": cid, "size": len(members),
+            "type": label["type"], "difficulty": label["difficulty"],
+            "title": records[members[0]]["title"][:120],
+        })
+    cands.sort(key=lambda c: c["size"], reverse=True)
+    cands = cands[:shortlist]
+
+    if not cands:
+        return {"cluster_id": None,
+                "reason": f"no cluster matches difficulty={tdiff or 'any'}",
+                "candidates": []}
+
+    if not (chat and skill):
+        best = cands[0]
+        return {"cluster_id": best["cluster_id"],
+                "reason": f"largest {best['difficulty']} cluster matching the target",
+                "candidates": cands}
+
+    listing = "\n".join(
+        f'- cluster_id {c["cluster_id"]}: [{c["type"]}/{c["difficulty"]}] {c["title"]}'
+        for c in cands)
+    prompt = ROUTE_PROMPT.format(skill=skill or "(any)",
+                                 difficulty=tdiff or "(any)", candidates=listing)
+    obj = _json_from(_invoke(chat, prompt, "route", max_tries=4) or "") or {}
+    valid = {c["cluster_id"] for c in cands}
+    cid = obj.get("cluster_id")
+    if cid not in valid:
+        return {"cluster_id": cands[0]["cluster_id"],
+                "reason": "router returned no valid id; fell back to top match",
+                "candidates": cands}
+    return {"cluster_id": cid,
+            "reason": str(obj.get("reason", "")).strip()[:200] or "router pick",
+            "candidates": cands}
 
 
 # --- checkpointed cache -----------------------------------------------------
 
-def _load_cache() -> dict:
-    if CACHE_FILE.exists():
-        return json.loads(CACHE_FILE.read_text())
-    return {}
+def _cache_file(mode: str) -> Path:
+    base = MODEL_NAME.replace(":", "_").replace("/", "_")
+    suffix = "_multi" if mode == "multi" else ""
+    return ingest.CACHE_DIR / f"classify_{base}{suffix}.json"
 
 
-def _save_cache(cache: dict) -> None:
-    CACHE_FILE.write_text(json.dumps(cache, indent=2))
+# single-mode path kept for reference / back-compat
+CACHE_FILE = _cache_file("single")
 
 
-def classify_clusters(records: list[dict], clusters: list[list[int]]) -> list[dict]:
-    """Classify each cluster's representative; return one label per cluster
-    (same index order as `clusters`)."""
-    cache = _load_cache()
+def _load_cache(path: Path) -> dict:
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _save_cache(path: Path, cache: dict) -> None:
+    path.write_text(json.dumps(cache, indent=2))
+
+
+def classify_clusters(records: list[dict], clusters: list[list[int]],
+                      mode: str | None = None) -> list[dict]:
+    """Label each cluster's representative; return one label per cluster
+    (same index order as `clusters`).
+
+    mode "single" (default) = one Triage call per cluster.
+    mode "multi"            = Triage, then Verifier on lower-confidence labels.
+    """
+    mode = (mode or CLASSIFY_MODE).lower()
+    cache_path = _cache_file(mode)
+    cache = _load_cache(cache_path)
     todo = [c for c in clusters if clu._key(records[c[0]]) not in cache]
     labels: dict[str, dict] = {}
+    verified = flagged = 0
+
     if todo:
-        print(f"[classify] {len(todo)} new / {len(clusters)} clusters "
+        print(f"[classify] mode={mode} · {len(todo)} new / {len(clusters)} clusters "
               f"({len(clusters) - len(todo)} cached) via {LLM_BACKEND}:{MODEL_NAME}")
         chat = _chat()
         for n, c in enumerate(todo, 1):
             rep = records[c[0]]
-            label = _classify_one(chat, rep)
+            label = _triage_one(chat, rep)                       # role 1: Triage
+
+            # role 2: Verifier — only for trustworthy-but-uncertain labels, so
+            # we don't blindly 3x the calls. Already-flagged or fallback labels
+            # skip it.
+            if (mode == "multi" and not label["needs_review"]
+                    and label["confidence"] < VERIFY_CONF_THRESHOLD):
+                verified += 1
+                v = _verify_one(chat, rep, label)
+                if not v["agree"]:
+                    flagged += 1
+                    label = {**label, "needs_review": True,
+                             "rationale": (label["rationale"]
+                                           + f" | verifier disagrees: {v['reason']}")[:200]}
+                if mode == "multi":
+                    time.sleep(SLEEP)
+
             labels[clu._key(rep)] = label
-            # Only PERSIST real labels — fallbacks (quota/parse failures) stay
-            # uncached so a later rerun actually retries them.
+            # Persist only trusted labels; fallbacks/flagged stay uncached so a
+            # rerun retries them.
             if not label["needs_review"]:
                 cache[clu._key(rep)] = label
-                _save_cache(cache)
+                _save_cache(cache_path, cache)
             print(f"  [classify] {n}/{len(todo)}  #{rep['number']} "
                   f"-> {label['type']}/{label['difficulty']}"
-                  f"{' (fallback)' if label['needs_review'] else ''}")
+                  f"{' (needs_review)' if label['needs_review'] else ''}")
             if n < len(todo):
                 time.sleep(SLEEP)
+        if mode == "multi":
+            print(f"  [verify] ran on {verified} low-confidence labels, "
+                  f"flagged {flagged} disagreement(s)")
     else:
-        print(f"[classify] all {len(clusters)} clusters served from cache")
+        print(f"[classify] mode={mode} · all {len(clusters)} clusters served from cache")
 
-    # Merge persisted cache with this run's in-memory (incl. fallback) labels.
-    return [cache.get(clu._key(records[c[0]]), labels.get(clu._key(records[c[0]]), dict(FALLBACK)))
+    return [cache.get(clu._key(records[c[0]]),
+                      labels.get(clu._key(records[c[0]]), dict(FALLBACK)))
             for c in clusters]
 
 
@@ -222,6 +384,6 @@ if __name__ == "__main__":
     from collections import Counter
     by_type = Counter(lab["type"] for lab in labels)
     print("-" * 60)
-    print(f"[done] {len(labels)} clusters classified "
+    print(f"[done] mode={CLASSIFY_MODE} · {len(labels)} clusters classified "
           f"({review} flagged for review)")
     print("by type:", dict(by_type))
