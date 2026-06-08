@@ -1,5 +1,12 @@
 """
-cluster.py — Group near-duplicate / same-topic issues via embeddings.
+cluster.py — Unsupervised clustering of issues via embeddings.
+
+This is unsupervised learning: there are no labels and no target. We embed each
+issue's text and group them purely by embedding similarity (cosine, via FAISS),
+letting the natural structure of the data decide how many groups exist. It is
+NOT deduplication — near-identical issues do collapse together, but so do
+distinct issues about the same underlying problem; the output is a set of
+discovered clusters, not a unique-ified list.
 
 Architectural parallel (production crash triage): crash fingerprinting. There,
 ~2,000 raw crashes collapsed into ~50 distinct signatures so an

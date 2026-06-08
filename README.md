@@ -13,7 +13,7 @@ A new contributor faces hundreds of open issues: stale ones, duplicates, ones fa
 ```
 GitHub API (multi-repo) --> ingest.py     (raw collection, cached)
                         --> normalize.py  (clean, extract signals)
-                        --> cluster.py    (embeddings + FAISS dedupe)
+                        --> cluster.py    (embeddings + FAISS unsupervised clustering)
                         --> classify.py   (Gemini: type/difficulty/staleness)
                         --> app.py        (Streamlit triage board)
 ```
