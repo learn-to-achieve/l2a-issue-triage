@@ -62,6 +62,10 @@ BODY_CHARS = 1500      # truncate body sent to the model
 CLASSIFY_MODE = os.environ.get("CLASSIFY_MODE", "single").lower()   # "single" | "multi"
 VERIFY_CONF_THRESHOLD = 0.8   # multi mode: verify only labels below this confidence
 
+# Optional distillation cost cascade: a cheap supervised model (src/prefilter.py)
+# short-circuits the LLM on confident, easy cases. Off by default.
+USE_PREFILTER = os.environ.get("PREFILTER", "").lower() in ("1", "true", "yes")
+
 TYPES = ["bug", "feature", "docs", "question", "other"]
 DIFFICULTIES = ["beginner", "intermediate", "advanced"]
 
@@ -309,6 +313,21 @@ def _cache_file(mode: str) -> Path:
 CACHE_FILE = _cache_file("single")
 
 
+def _load_prefilter():
+    """Lazily load the distilled pre-filter model, or None if absent/unavailable."""
+    try:
+        from . import prefilter
+        return prefilter.load()
+    except Exception as e:  # noqa: BLE001 — sklearn/joblib missing etc.
+        print(f"  [prefilter] unavailable: {e}")
+        return None
+
+
+def _prefilter_predict(model, text: str) -> tuple[dict | None, bool]:
+    from . import prefilter
+    return prefilter.predict(text, model=model)
+
+
 def _load_cache(path: Path) -> dict:
     return json.loads(path.read_text()) if path.exists() else {}
 
@@ -330,29 +349,44 @@ def classify_clusters(records: list[dict], clusters: list[list[int]],
     cache = _load_cache(cache_path)
     todo = [c for c in clusters if clu._key(records[c[0]]) not in cache]
     labels: dict[str, dict] = {}
-    verified = flagged = 0
+    verified = flagged = short_circuited = escalated = 0
 
     if todo:
-        print(f"[classify] mode={mode} · {len(todo)} new / {len(clusters)} clusters "
+        print(f"[classify] mode={mode} · prefilter={'on' if USE_PREFILTER else 'off'} · "
+              f"{len(todo)} new / {len(clusters)} clusters "
               f"({len(clusters) - len(todo)} cached) via {LLM_BACKEND}:{MODEL_NAME}")
-        chat = _chat()
+        pre = _load_prefilter() if USE_PREFILTER else None
+        if USE_PREFILTER and pre is None:
+            print("  [prefilter] enabled but no model found "
+                  "(train via `python -m src.prefilter`); escalating all to the LLM")
+        chat = None  # created lazily — an all-short-circuit run never loads the LLM
         for n, c in enumerate(todo, 1):
             rep = records[c[0]]
-            label = _triage_one(chat, rep)                       # role 1: Triage
+            label = None
 
-            # role 2: Verifier — only for trustworthy-but-uncertain labels, so
-            # we don't blindly 3x the calls. Already-flagged or fallback labels
-            # skip it.
-            if (mode == "multi" and not label["needs_review"]
-                    and label["confidence"] < VERIFY_CONF_THRESHOLD):
-                verified += 1
-                v = _verify_one(chat, rep, label)
-                if not v["agree"]:
-                    flagged += 1
-                    label = {**label, "needs_review": True,
-                             "rationale": (label["rationale"]
-                                           + f" | verifier disagrees: {v['reason']}")[:200]}
-                if mode == "multi":
+            # Cost cascade: a confident cheap prediction skips the LLM entirely.
+            if pre is not None:
+                plabel, confident = _prefilter_predict(pre, rep.get("clean_text", ""))
+                if confident:
+                    label = plabel
+                    short_circuited += 1
+
+            if label is None:                                    # escalate to the LLM
+                escalated += 1
+                if chat is None:
+                    chat = _chat()
+                label = _triage_one(chat, rep)                   # role 1: Triage
+                # role 2: Verifier — only for trustworthy-but-uncertain labels,
+                # so we don't blindly 3x the calls. Flagged/fallback labels skip it.
+                if (mode == "multi" and not label["needs_review"]
+                        and label["confidence"] < VERIFY_CONF_THRESHOLD):
+                    verified += 1
+                    v = _verify_one(chat, rep, label)
+                    if not v["agree"]:
+                        flagged += 1
+                        label = {**label, "needs_review": True,
+                                 "rationale": (label["rationale"]
+                                               + f" | verifier disagrees: {v['reason']}")[:200]}
                     time.sleep(SLEEP)
 
             labels[clu._key(rep)] = label
@@ -361,11 +395,17 @@ def classify_clusters(records: list[dict], clusters: list[list[int]],
             if not label["needs_review"]:
                 cache[clu._key(rep)] = label
                 _save_cache(cache_path, cache)
-            print(f"  [classify] {n}/{len(todo)}  #{rep['number']} "
+            src = label.get("source", "llm")
+            print(f"  [{src}] {n}/{len(todo)}  #{rep['number']} "
                   f"-> {label['type']}/{label['difficulty']}"
                   f"{' (needs_review)' if label['needs_review'] else ''}")
-            if n < len(todo):
+            # No pacing needed after a cheap prefilter hit (no API call was made).
+            if src != "prefilter" and n < len(todo):
                 time.sleep(SLEEP)
+
+        if USE_PREFILTER:
+            print(f"  [prefilter] short-circuited {short_circuited}, "
+                  f"escalated {escalated} to the LLM")
         if mode == "multi":
             print(f"  [verify] ran on {verified} low-confidence labels, "
                   f"flagged {flagged} disagreement(s)")

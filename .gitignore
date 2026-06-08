@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 .env
 data/
+models/
 .DS_Store
