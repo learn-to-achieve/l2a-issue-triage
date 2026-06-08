@@ -1,0 +1,5 @@
+# Deps for the read-only FastAPI service (api/main.py) ONLY — decoupled from the
+# Streamlit board and the pipeline. It just reads data/triage.json.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.0

@@ -54,6 +54,26 @@ per-type and per-difficulty precision / recall / F1 and confusion matrices
 skipped, so you can label incrementally; with zero filled rows it just reports
 that the golden set is still a template.
 
+## API (FastAPI)
+
+A read-only JSON API over the same `data/triage.json`, decoupled from Streamlit
+(separate process and dependencies).
+
+```
+pip install -r api/requirements-api.txt
+uvicorn api.main:app --reload --port 8000
+```
+
+Endpoints (interactive docs at `http://localhost:8000/docs`):
+
+| Endpoint | Notes |
+|----------|-------|
+| `GET /health` | liveness + whether triage data is present |
+| `GET /summary` | issue/cluster/beginner/needs-review counts |
+| `GET /clusters` | filters: `type`, `difficulty`, `beginner`, `stale`, `q` (title search) |
+| `GET /clusters/{id}` | one cluster with all member issues |
+| `GET /issues` | all issues; filters: `beginner`, `q` |
+
 ## Roadmap (Phase 2)
 
 - Learner skill profiles + matching score
