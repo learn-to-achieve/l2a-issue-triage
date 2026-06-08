@@ -1,0 +1,5 @@
+# Runtime deps for the Cloud Run board ONLY (app.py reads triage.json).
+# The pipeline's ML deps (faiss, langchain, google-genai, ollama) run locally
+# and are intentionally NOT shipped — keeps the image small + cold-start fast.
+streamlit>=1.35
+pandas>=2.0

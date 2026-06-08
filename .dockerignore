@@ -1,0 +1,10 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.streamlit/
+# Ship data/triage.json (the board reads it) but NOT the bulky pipeline caches.
+data/cache/

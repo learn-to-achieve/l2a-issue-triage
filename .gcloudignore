@@ -1,0 +1,13 @@
+# Controls what `gcloud run deploy --source .` uploads to Cloud Build.
+# IMPORTANT: the mere existence of this file stops gcloud from falling back to
+# .gitignore — which is what lets data/triage.json (gitignored) ship in the build.
+.git
+.gitignore
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.streamlit/
+# Keep data/triage.json; drop the heavy pipeline caches (embeddings, raw issues).
+data/cache/
