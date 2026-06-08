@@ -1,0 +1,43 @@
+# ILLUSTRATIVE ONLY — do NOT apply to a cluster. Shows how the board container
+# (built from the repo-root Dockerfile) would run on Kubernetes. The live
+# deployment is GCP Cloud Run; this is here to demonstrate the k8s shape.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: l2a-issue-triage
+  labels:
+    app: l2a-issue-triage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: l2a-issue-triage
+  template:
+    metadata:
+      labels:
+        app: l2a-issue-triage
+    spec:
+      containers:
+        - name: board
+          image: l2a-issue-triage:latest   # built from the repo-root Dockerfile
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

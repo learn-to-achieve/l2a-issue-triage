@@ -1,0 +1,17 @@
+# ILLUSTRATIVE ONLY — do NOT apply. Exposes the board Deployment inside the
+# cluster. For external access you'd switch to type: LoadBalancer or add an Ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: l2a-issue-triage
+  labels:
+    app: l2a-issue-triage
+spec:
+  type: ClusterIP
+  selector:
+    app: l2a-issue-triage
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 8080
