@@ -1,7 +1,7 @@
 """
 normalize.py — Clean raw GitHub issues into ML-ready records.
 
-Architectural parallel (Google Nest): this layer flattens nested,
+Architectural parallel (production crash triage): this layer flattens nested,
 multi-source telemetry into uniform rows the way crash signatures
 were normalized before clustering. Raw issue JSON is noisy —
 HTML comment templates, fenced code blocks, checklist boilerplate.

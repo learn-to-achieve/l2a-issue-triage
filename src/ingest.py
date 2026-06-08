@@ -1,9 +1,9 @@
 """
 ingest.py — Multi-source GitHub issue ingestion.
 
-Architectural parallel (Google Nest): this layer plays the role of
-multi-source crash ingestion (Coverity / Plx Workflows / GoCrash).
-Instead of crash reports from three systems, we pull open issues
+Architectural parallel (production crash triage): this layer plays the role
+of multi-source crash ingestion from several internal reporting systems.
+Instead of crash reports from multiple systems, we pull open issues
 from multiple GitHub repos. Everything downstream assumes this
 layer produces raw, uniform JSON.
 

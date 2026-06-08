@@ -18,7 +18,7 @@ GitHub API (multi-repo) --> ingest.py     (raw collection, cached)
                         --> app.py        (Streamlit triage board)
 ```
 
-The pattern mirrors a production crash-triage system built at Google Nest:
+The pattern mirrors a production crash-triage system:
 multi-source ingest -> normalization -> fingerprint clustering -> LLM consumer.
 There it cut triage from ~48 hours to under 4. Here it routes learners to
 their first contribution.

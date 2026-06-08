@@ -1,7 +1,7 @@
 """
-classify.py — Gemini consumer: label each issue cluster.
+classify.py — LLM consumer: label each issue cluster.
 
-Architectural parallel (Google Nest): label the crash *signature*
+Architectural parallel (production crash triage): label the crash *signature*
 once, then apply to every instance. Here we classify the cluster
 representative and fan the label out to all members — 115 clusters
 means 115 Gemini calls, not 275. The clustering step pays for itself

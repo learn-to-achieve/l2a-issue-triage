@@ -1,7 +1,7 @@
 """
 cluster.py — Group near-duplicate / same-topic issues via embeddings.
 
-Architectural parallel (Google Nest): crash fingerprinting. There,
+Architectural parallel (production crash triage): crash fingerprinting. There,
 ~2,000 raw crashes collapsed into ~50 distinct signatures so an
 engineer triaged groups, not noise. Here, 276 issues collapse into
 N distinct problems so a newcomer sees real choices.
