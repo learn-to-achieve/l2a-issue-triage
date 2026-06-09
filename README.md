@@ -2,6 +2,8 @@
 
 AI-assisted triage agent that routes new open-source contributors to the right GitHub issue.
 
+**Live demo:** https://l2a-issue-triage-lcpy7y5kkq-uw.a.run.app/
+
 Built at [Learn to Achieve](https://l2a.me), a 501(c)(3) helping learners make real contributions from day one.
 
 ## Why
